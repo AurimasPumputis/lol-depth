@@ -1,0 +1,12 @@
+# The Oracle CSVs are ~50 MB each. GitHub refuses files over 100 MB and gets
+# slow long before that, so the data folder stays local.
+data/
+
+# depth/ is the collected order books, one small file per UTC day.
+# It is the whole point of this repo, so it is NOT ignored.
+
+# Everything generated is reproducible from the scripts.
+out/
+__pycache__/
+*.pyc
+.cache/

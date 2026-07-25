@@ -1,0 +1,64 @@
+name: depth snapshot
+
+# Runs every 15 minutes and saves the Polymarket order book for LoL maps that
+# are about to start. GitHub's scheduler is not punctual: a run can be late by
+# 10 minutes or skipped entirely when GitHub is busy. That is fine here, because
+# depth_snapshot.py takes everything starting in the next 90 minutes, so each
+# market gets caught several times and you can pick the snapshot closest to
+# kickoff later. It would NOT be fine if we only snapshotted once per market.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # lets you press a button to run it by hand
+
+permissions:
+  contents: write           # needed so the job can commit depth.csv back
+
+concurrency:
+  group: depth-snapshot     # never let two runs commit at the same time
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # If the maths is broken, fail here instead of writing bad numbers.
+      - name: self-test
+        run: python forward/depth_snapshot.py --self-test
+
+      - name: snapshot
+        run: python forward/depth_snapshot.py --outdir depth --window 90
+
+      - name: commit
+        run: |
+          git config user.name  "depth-bot"
+          git config user.email "depth-bot@users.noreply.github.com"
+
+          if [ -z "$(git status --porcelain depth/)" ]; then
+            echo "no matches in the window, nothing to commit"
+            exit 0
+          fi
+
+          git add depth/
+          git commit -m "depth $(date -u '+%Y-%m-%d %H:%M') UTC"
+
+          # Another run may have pushed while this one was working.
+          for i in 1 2 3; do
+            if git pull --rebase --autostash && git push; then
+              echo "pushed"
+              exit 0
+            fi
+            echo "push attempt $i failed, retrying"
+            sleep 5
+          done
+          echo "could not push after 3 tries"
+          exit 1
