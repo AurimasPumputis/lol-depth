@@ -82,23 +82,34 @@ jobs:
           git config user.name  "depth-bot"
           git config user.email "depth-bot@users.noreply.github.com"
 
+          # Two things append to the end of the same CSV: this run and whatever
+          # else pushed while it was working. Git calls that a conflict even
+          # though both sides only added lines, so depth/*.csv is set to the
+          # built-in `union` merge driver in .gitattributes. Without that file
+          # this function conflicts and the run dies. Check it exists.
           push_if_changed () {
             if [ -z "$(git status --porcelain depth/)" ]; then
               echo "nothing new to commit"
               return 0
             fi
             git add depth/
-            git commit -m "depth $(date -u '+%Y-%m-%d %H:%M') UTC"
-            # Another run may have pushed while this one was working.
-            for i in 1 2 3; do
+            git commit -m "depth $(date -u '+%Y-%m-%d %H:%M') UTC" || return 1
+
+            for i in 1 2 3 4 5; do
               if git pull --rebase --autostash && git push; then
                 echo "pushed"
                 return 0
               fi
+              # A failed rebase leaves the repo mid-rebase with unmerged files,
+              # and every later pull then dies with "Pulling is not possible
+              # because you have unmerged files". Observed on run #25: attempt 1
+              # broke the state, attempts 2 and 3 could not have worked. Retries
+              # are theatre unless the state is reset first.
+              git rebase --abort 2>/dev/null || true
               echo "push attempt $i failed, retrying"
-              sleep 5
+              sleep $(( i * 5 ))
             done
-            echo "could not push after 3 tries"
+            echo "could not push after 5 tries"
             return 1
           }
 
@@ -116,8 +127,15 @@ jobs:
               --outdir depth --window 240 \
               || echo "snapshot failed, continuing"
 
+            # `|| true` is load-bearing. GitHub runs this block with `bash -e`,
+            # not plain bash, so a non-zero return from push_if_changed aborts
+            # the whole step. Run #25 died at 7m55s of a 62-minute loop that
+            # way, losing every remaining snapshot including the ones nearest
+            # kickoff, which are the rows both frozen rules read. Nothing is
+            # lost by continuing: the rows stay in the working tree and the
+            # next successful commit takes them.
             if [ $(( (i + 1) % 2 )) -eq 0 ]; then
-              push_if_changed
+              push_if_changed || true
             fi
 
             if [ "$i" -lt 10 ]; then
