@@ -8,8 +8,26 @@ name: depth snapshot
 # So the schedule is only a wake-up call now. Each triggered run takes its own
 # snapshots, every 5 minutes for 50 minutes, and commits along the way. One
 # delivered trigger produces about eleven snapshots instead of one, and the
-# scheduler's jitter stops mattering. Every market inside the 90-minute window
-# is now caught within 5 minutes of its start time.
+# scheduler's jitter stops mattering. Every market inside the window is now
+# caught within 5 minutes of its start time.
+#
+# The window is 240 minutes, not 90. Measured on 2026-07-26/27, 4 of 22 map
+# markets were never seen before kickoff at all, and a map market not seen
+# before kickoff can never produce a bet. The cause was not the window itself
+# but gaps in the run schedule: one 489-minute hole overnight, and several
+# runs that stopped after one snapshot. A wider window does not fix those
+# holes, it survives them, because one surviving snapshot then covers four
+# hours of upcoming kickoffs instead of one and a half.
+#
+# 240 was chosen by measurement, not taste. One snapshot took 59s at that
+# window against roughly 30s at 90, so the loop costs about 11 minutes of work
+# on top of the 50 minutes of sleep. Going wider stops fitting inside the job.
+#
+# Widening the window does NOT touch the frozen rule. bet_logger.py reads the
+# last snapshot before kickoff; a wider window only adds earlier rows and
+# leaves that one alone. It does change the sample, by rescuing markets that
+# were previously missed, so the change is dated here: 2026-07-27, made when
+# 5 bets were logged and none had settled.
 #
 # The repo is public, so Actions minutes are unmetered. If it is ever made
 # private this file will burn the free allowance in about three days.
@@ -33,7 +51,18 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 70     # must exceed the 50-minute loop below
+    # Must exceed the loop below. The loop is 50 minutes of sleep plus 11
+    # snapshots. At --window 240 one snapshot measured 59s off-peak, so the
+    # loop is about 62 minutes including checkout and the self-test. At peak
+    # hours, when the EU and Americas leagues overlap, more markets are in
+    # scope and a snapshot will take longer, so the headroom here is
+    # deliberate. A timeout costs nothing when the job finishes early; it only
+    # bites when something hangs.
+    #
+    # Getting this wrong is expensive in a specific way: the kill lands at the
+    # END of the loop, and the end is the snapshots closest to kickoff, which
+    # are exactly the rows the frozen rule reads.
+    timeout-minutes: 110
 
     steps:
       - uses: actions/checkout@v4
@@ -73,15 +102,21 @@ jobs:
             return 1
           }
 
-          # 11 snapshots, 5 minutes apart, committing after every third one so
-          # a cancelled run never loses more than 15 minutes of data.
+          # 11 snapshots, 5 minutes apart, committing after every second one
+          # so a cancelled run never loses more than 10 minutes of data.
+          #
+          # Do not shorten the 300s sleep to buy time. The spacing decides how
+          # close the last pre-kickoff snapshot sits to the start, currently a
+          # median of 2.1 minutes, and that snapshot's price is what the
+          # frozen rule records. Sleep is the one number in this file that
+          # feeds the test directly.
           for i in $(seq 0 10); do
             echo "--- snapshot $i of 10 at $(date -u '+%H:%M:%S') UTC"
             python forward/depth_snapshot.py \
-              --outdir depth --window 90 \
+              --outdir depth --window 240 \
               || echo "snapshot failed, continuing"
 
-            if [ $(( (i + 1) % 3 )) -eq 0 ]; then
+            if [ $(( (i + 1) % 2 )) -eq 0 ]; then
               push_if_changed
             fi
 
